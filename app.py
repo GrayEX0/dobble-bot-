@@ -2,6 +2,7 @@ import io
 import math
 import random
 import zipfile
+import os
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 
@@ -12,6 +13,15 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
+
+
+# ============================================================
+# Dobble Bot (Streamlit) — Images + Words, Circle/Square,
+# face background (color/image), scissor-friendly bleed,
+# double black outline, crop marks, duplex backs,
+# random fonts/colors for words, upload custom font,
+# word font size slider, bold + text outline option.
+# ============================================================
 
 
 # ----------------------------
@@ -111,6 +121,7 @@ ALLOWED_WORD_COLORS = {
     "blue": (30, 80, 220, 255),
 }
 
+# Candidate fonts commonly available on Streamlit Cloud / Linux images
 FONT_CANDIDATES = [
     "DejaVuSans.ttf",
     "DejaVuSans-Bold.ttf",
@@ -153,31 +164,107 @@ def bbox_intersect(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -
     return not (ax2 <= bx1 or bx2 <= ax1 or ay2 <= by1 or by2 <= ay1)
 
 
-def try_load_font(font_name: str, size: int) -> Optional[ImageFont.FreeTypeFont]:
+def try_load_font(font_name_or_path: str, size: int) -> Optional[ImageFont.FreeTypeFont]:
     try:
-        return ImageFont.truetype(font_name, size)
+        return ImageFont.truetype(font_name_or_path, size)
     except Exception:
         return None
 
 
-def pick_font(rng: random.Random, font_size: int, randomize: bool, preferred: Optional[str] = None) -> ImageFont.ImageFont:
+def save_uploaded_font(uploaded_font_file) -> Optional[str]:
+    """
+    Save an uploaded font file to a local path Streamlit can read.
+    Returns filesystem path or None.
+    """
+    if uploaded_font_file is None:
+        return None
+    ext = os.path.splitext(uploaded_font_file.name)[1].lower()
+    if ext not in [".ttf", ".otf"]:
+        return None
+    out_path = f"uploaded_font{ext}"
+    with open(out_path, "wb") as f:
+        f.write(uploaded_font_file.getbuffer())
+    return out_path
+
+
+def pick_font(
+    rng: random.Random,
+    font_size: int,
+    randomize: bool,
+    preferred: Optional[str] = None,
+    uploaded_font_path: Optional[str] = None,
+    include_uploaded_in_random_pool: bool = True,
+    force_bold: bool = False,
+) -> ImageFont.ImageFont:
+    """
+    If a custom font is uploaded:
+      - When randomize is OFF → use it (unless preferred overrides it).
+      - When randomize is ON and include_uploaded_in_random_pool is True → add it to candidates.
+    force_bold: if True, try to choose a bold font candidate when possible.
+    """
+    # Preferred system font (if provided) takes priority
     if preferred:
         f = try_load_font(preferred, font_size)
         if f:
             return f
 
-    if randomize:
-        cands = FONT_CANDIDATES[:]
-        rng.shuffle(cands)
-        for name in cands:
-            f = try_load_font(name, font_size)
-            if f:
-                return f
+    # If randomize OFF and uploaded font exists, use it
+    if uploaded_font_path and not randomize:
+        f = try_load_font(uploaded_font_path, font_size)
+        if f:
+            return f
 
+    candidates = FONT_CANDIDATES[:]
+    if uploaded_font_path and include_uploaded_in_random_pool:
+        candidates.append(uploaded_font_path)
+
+    if force_bold:
+        # prefer files with "Bold" in name first
+        bold_first = [c for c in candidates if "bold" in c.lower()]
+        non_bold = [c for c in candidates if "bold" not in c.lower()]
+        candidates = bold_first + non_bold
+
+    if randomize:
+        rng.shuffle(candidates)
+
+    # Try candidates in order
+    for name in candidates:
+        f = try_load_font(name, font_size)
+        if f:
+            return f
+
+    # Fallbacks
     f = try_load_font("DejaVuSans.ttf", font_size)
     if f:
         return f
     return ImageFont.load_default()
+
+
+def draw_text_with_outline(
+    draw: ImageDraw.ImageDraw,
+    pos: Tuple[int, int],
+    text: str,
+    font: ImageFont.ImageFont,
+    fill: Tuple[int, int, int, int],
+    outline_fill: Tuple[int, int, int, int],
+    outline_px: int,
+):
+    """
+    Draw text with a stroke/outline by drawing the text multiple times offset.
+    """
+    x, y = pos
+    if outline_px <= 0:
+        draw.text((x, y), text, font=font, fill=fill)
+        return
+
+    for dx in range(-outline_px, outline_px + 1):
+        for dy in range(-outline_px, outline_px + 1):
+            if dx == 0 and dy == 0:
+                continue
+            # circular-ish stroke
+            if dx * dx + dy * dy <= outline_px * outline_px:
+                draw.text((x + dx, y + dy), text, font=font, fill=outline_fill)
+    draw.text((x, y), text, font=font, fill=fill)
 
 
 def make_text_symbol(
@@ -187,23 +274,47 @@ def make_text_symbol(
     randomize_color: bool,
     chosen_color_name: str,
     preferred_font: Optional[str],
+    uploaded_font_path: Optional[str],
+    include_uploaded_in_random_pool: bool,
+    word_font_size: int,
+    force_bold: bool,
+    text_outline: bool,
+    outline_px: int,
+    outline_color: str,
     base_canvas_px: int = 520,
-    font_size: int = 90,
     pad: int = 24,
     rounded: int = 28,
 ) -> Image.Image:
+    """
+    Creates a transparent RGBA 'symbol' containing the text on a translucent pill.
+    Supports custom uploaded font, random fonts, random colors, bold, and outline.
+    """
     text = text.strip()
     if not text:
         return Image.new("RGBA", (base_canvas_px, base_canvas_px), (0, 0, 0, 0))
 
-    font = pick_font(rng, font_size, randomize_font, preferred=preferred_font)
+    # font
+    font = pick_font(
+        rng=rng,
+        font_size=word_font_size,
+        randomize=randomize_font,
+        preferred=preferred_font,
+        uploaded_font_path=uploaded_font_path,
+        include_uploaded_in_random_pool=include_uploaded_in_random_pool,
+        force_bold=force_bold,
+    )
 
+    # color
     if randomize_color:
         color_name = rng.choice(list(ALLOWED_WORD_COLORS.keys()))
     else:
         color_name = chosen_color_name if chosen_color_name in ALLOWED_WORD_COLORS else "black"
     text_color = ALLOWED_WORD_COLORS[color_name]
 
+    # outline color
+    outline_fill = (0, 0, 0, 255) if outline_color == "black" else (255, 255, 255, 255)
+
+    # measure
     tmp = Image.new("RGBA", (base_canvas_px, base_canvas_px), (0, 0, 0, 0))
     d = ImageDraw.Draw(tmp)
     bbox = d.textbbox((0, 0), text, font=font)
@@ -214,12 +325,27 @@ def make_text_symbol(
 
     label = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     dl = ImageDraw.Draw(label)
+
+    # translucent white pill background for readability
     dl.rounded_rectangle((0, 0, w - 1, h - 1), radius=rounded, fill=(255, 255, 255, 220))
 
     tx = (w - tw) // 2 - bbox[0]
     ty = (h - th) // 2 - bbox[1]
-    dl.text((tx, ty), text, font=font, fill=text_color)
 
+    if text_outline:
+        draw_text_with_outline(
+            draw=dl,
+            pos=(tx, ty),
+            text=text,
+            font=font,
+            fill=text_color,
+            outline_fill=outline_fill,
+            outline_px=max(1, int(outline_px)),
+        )
+    else:
+        dl.text((tx, ty), text, font=font, fill=text_color)
+
+    # center onto square canvas for consistent scaling/rotation
     canvas_size = max(w, h)
     out = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
     out.alpha_composite(label, ((canvas_size - w) // 2, (canvas_size - h) // 2))
@@ -250,11 +376,6 @@ def make_face_background(
     solid_alpha: int,
     bg_image: Optional[Image.Image],
 ) -> Image.Image:
-    """
-    Returns an RGBA background tile (size_px x size_px).
-    - mode: "Solid color" or "Image"
-    - if Circle, applies circle mask
-    """
     if mode == "Image" and bg_image is not None:
         bg = bg_image.convert("RGBA")
         bg = ImageOps.fit(bg, (size_px, size_px), method=Image.LANCZOS, centering=(0.5, 0.5))
@@ -276,9 +397,6 @@ def make_face_background(
 # ----------------------------
 
 def add_bleed_border(card: Image.Image, shape: str, bleed_px: int) -> Image.Image:
-    """
-    White halo ring INSIDE the cut line for nicer scissor edges.
-    """
     if bleed_px <= 0:
         return card
 
@@ -304,10 +422,6 @@ def add_bleed_border(card: Image.Image, shape: str, bleed_px: int) -> Image.Imag
 
 
 def draw_double_black_outline(card: Image.Image, shape: str, outer_px: int, gap_px: int) -> Image.Image:
-    """
-    Two black outlines: outer and inner (separated by gap_px).
-    outer_px controls line thickness for BOTH strokes.
-    """
     if outer_px <= 0:
         return card
 
@@ -315,9 +429,8 @@ def draw_double_black_outline(card: Image.Image, shape: str, outer_px: int, gap_
     d = ImageDraw.Draw(out)
     w, h = out.size
 
-    # outer stroke rectangle/ellipse
     inset_outer = outer_px // 2 + 2
-    inset_inner = inset_outer + gap_px + outer_px  # step in for inner line
+    inset_inner = inset_outer + gap_px + outer_px
 
     if shape == "Circle":
         d.ellipse((inset_outer, inset_outer, w - inset_outer - 1, h - inset_outer - 1),
@@ -346,7 +459,6 @@ def place_symbols_on_card(
     rng: random.Random,
     shape: str,
 ) -> Image.Image:
-    # start from background
     base = face_bg.copy()
 
     cx, cy = size_px / 2, size_px / 2
@@ -416,7 +528,14 @@ def place_symbols_on_card(
 # Card back
 # ----------------------------
 
-def make_back_card_image(back_img: Image.Image, size_px: int, shape: str, outline_px: int, outline_gap_px: int, bleed_px: int) -> Image.Image:
+def make_back_card_image(
+    back_img: Image.Image,
+    size_px: int,
+    shape: str,
+    outline_px: int,
+    outline_gap_px: int,
+    bleed_px: int
+) -> Image.Image:
     back = back_img.convert("RGBA")
     back = ImageOps.fit(back, (size_px, size_px), method=Image.LANCZOS, centering=(0.5, 0.5))
 
@@ -432,13 +551,10 @@ def make_back_card_image(back_img: Image.Image, size_px: int, shape: str, outlin
 
 
 # ----------------------------
-# PDF export: cut lines + crop marks + duplex
+# PDF export: double outline + crop marks + duplex
 # ----------------------------
 
 def draw_double_outline_vector(c: canvas.Canvas, shape: str, x0: float, y0: float, size_pt: float, line_pt: float, gap_pt: float):
-    """
-    Two vector outlines: outer and inner.
-    """
     c.setLineWidth(line_pt)
     if shape == "Circle":
         c.circle(x0 + size_pt / 2, y0 + size_pt / 2, size_pt / 2)
@@ -454,16 +570,15 @@ def draw_crop_marks(c: canvas.Canvas, x0: float, y0: float, size_pt: float, mark
     c.setLineWidth(line_pt)
     x1, y1 = x0 + size_pt, y0 + size_pt
 
-    # bottom-left
     c.line(x0 - gap_pt - mark_len_pt, y0 - gap_pt, x0 - gap_pt, y0 - gap_pt)
     c.line(x0 - gap_pt, y0 - gap_pt - mark_len_pt, x0 - gap_pt, y0 - gap_pt)
-    # bottom-right
+
     c.line(x1 + gap_pt, y0 - gap_pt, x1 + gap_pt + mark_len_pt, y0 - gap_pt)
     c.line(x1 + gap_pt, y0 - gap_pt - mark_len_pt, x1 + gap_pt, y0 - gap_pt)
-    # top-left
+
     c.line(x0 - gap_pt - mark_len_pt, y1 + gap_pt, x0 - gap_pt, y1 + gap_pt)
     c.line(x0 - gap_pt, y1 + gap_pt, x0 - gap_pt, y1 + gap_pt + mark_len_pt)
-    # top-right
+
     c.line(x1 + gap_pt, y1 + gap_pt, x1 + gap_pt + mark_len_pt, y1 + gap_pt)
     c.line(x1 + gap_pt, y1 + gap_pt, x1 + gap_pt, y1 + gap_pt + mark_len_pt)
 
@@ -512,7 +627,6 @@ def build_a4_pdf_duplex(
 
     idx = 0
     while idx < len(front_cards):
-        # FRONT PAGE
         front_positions = []
         for r in range(rows):
             for col in range(cols):
@@ -536,7 +650,6 @@ def build_a4_pdf_duplex(
 
         c.showPage()
 
-        # BACK PAGE
         if back_card_img is not None:
             for (r, col, _x0, _y0, _front_idx) in front_positions:
                 back_col = (cols - 1 - col) if mirror_backs_horizontally else col
@@ -591,13 +704,13 @@ def choose_symbols_for_deck(
     return chosen
 
 
-# ----------------------------
-# UI
-# ----------------------------
+# ============================================================
+# Streamlit UI
+# ============================================================
 
 st.set_page_config(page_title="Dobble Bot (K1/K2/K3)", layout="wide")
 st.title("Dobble Bot 🎴 (K1 / K2 / K3)")
-st.caption("Scissor-friendly: bleed border + DOUBLE black outline + crop marks (PDF). Face background supported.")
+st.caption("Scissor-friendly: bleed border + double black outline + crop marks (PDF). Face background supported.")
 
 colA, colB = st.columns([1.15, 0.85])
 
@@ -653,11 +766,32 @@ with colB:
     solid_alpha = st.slider("Face color opacity", 0, 255, 255, step=5)
 
     st.markdown("**Word styling**")
+    uploaded_font_file = st.file_uploader(
+        "Upload a custom font for word cards (.ttf/.otf)",
+        type=["ttf", "otf"],
+        accept_multiple_files=False
+    )
+    use_uploaded_font_in_random_pool = st.checkbox(
+        "Include uploaded font when randomizing fonts",
+        value=True
+    )
+
+    word_font_size = st.slider("Word font size", 24, 140, 90, step=2)
+
     randomize_word_fonts = st.checkbox("Randomize word fonts", value=True)
     randomize_word_colors = st.checkbox("Randomize word colors", value=True)
+
     preferred_font = st.selectbox("Preferred font (used if randomize fonts OFF)", ["(auto)"] + FONT_CANDIDATES, index=0)
     preferred_font = None if preferred_font == "(auto)" else preferred_font
+
     chosen_word_color = st.selectbox("Word color (used if randomize colors OFF)", list(ALLOWED_WORD_COLORS.keys()), index=0)
+
+    force_bold_words = st.checkbox("Bold words (best-effort)", value=False)
+
+    st.markdown("**Text outline (readability)**")
+    text_outline = st.checkbox("Outline word text", value=True)
+    outline_color = st.selectbox("Outline color", ["black", "white"], index=0)
+    text_outline_px = st.slider("Outline thickness (px)", 1, 6, 2, step=1)
 
     st.markdown("**Mix words + images**")
     force_min_words = st.slider("Force at least this many word-symbols into the deck", 0, 50, 6, step=1)
@@ -684,10 +818,19 @@ st.divider()
 # Parse words
 words = [w.strip() for w in (words_text or "").splitlines() if w.strip()]
 
-imgs_raw = load_images(uploaded) if uploaded else []
+# Seeded RNG
 rng = random.Random(int(rng_seed))
 
-# Word symbols
+# Load images
+imgs_raw = load_images(uploaded) if uploaded else []
+
+# Save uploaded font (if any)
+uploaded_font_path = save_uploaded_font(uploaded_font_file)
+if uploaded_font_file is not None and uploaded_font_path is None:
+    st.error("Font upload must be a .ttf or .otf file.")
+    st.stop()
+
+# Build word symbols
 word_symbols: List[Image.Image] = []
 for w in words:
     sym = make_text_symbol(
@@ -697,8 +840,16 @@ for w in words:
         randomize_color=randomize_word_colors,
         chosen_color_name=chosen_word_color,
         preferred_font=preferred_font,
+        uploaded_font_path=uploaded_font_path,
+        include_uploaded_in_random_pool=use_uploaded_font_in_random_pool,
+        word_font_size=int(word_font_size),
+        force_bold=bool(force_bold_words),
+        text_outline=bool(text_outline),
+        outline_px=int(text_outline_px),
+        outline_color=str(outline_color),
         base_canvas_px=520,
-        font_size=90,
+        pad=24,
+        rounded=28,
     )
     word_symbols.append(normalize_symbol(sym, pad=10))
 
@@ -728,7 +879,7 @@ if total_symbols < v:
     st.error(f"Not enough symbols for n={chosen_n}. Need {v}, you have {total_symbols}.")
     st.stop()
 
-# Face background (prepare once)
+# Face background
 face_bg_img = None
 if face_bg_mode == "Image" and face_bg_upload is not None:
     face_bg_img = Image.open(face_bg_upload).convert("RGBA")
@@ -754,7 +905,7 @@ for i, im in enumerate(preview_pool):
     with prev_cols[i % 6]:
         st.image(im, caption=f"#{i}", use_container_width=True)
 
-# Prepare back preview if available
+# Prepare back
 back_card_prepared = None
 if duplex and back_upload is not None:
     back_img = Image.open(back_upload).convert("RGBA")
@@ -793,7 +944,6 @@ st.success(f"Deck generated and verified ✅  ({v} cards, {k} symbols each)")
 # Render cards
 with st.spinner("Rendering card PNGs..."):
     rendered_cards: List[Image.Image] = []
-
     order = list(range(len(cards)))
     rng.shuffle(order)
 
@@ -811,7 +961,7 @@ with st.spinner("Rendering card PNGs..."):
             shape=shape,
         )
 
-        # scissor-friendly finishing
+        # Finishing touches
         card_img = add_bleed_border(card_img, shape=shape, bleed_px=int(bleed_px))
         card_img = draw_double_black_outline(card_img, shape=shape, outer_px=int(outline_px), gap_px=int(outline_gap_px))
 
