@@ -52,8 +52,10 @@ def generate_projective_plane_deck(n: int) -> List[List[int]]:
     def P(x: int, y: int) -> int:
         return 1 + n + x * n + y
 
+    # line at infinity
     cards.append([INF] + S)
 
+    # y = m x + b
     for m in range(n):
         for b in range(n):
             card = [S[m]]
@@ -62,16 +64,15 @@ def generate_projective_plane_deck(n: int) -> List[List[int]]:
                 card.append(P(x, y))
             cards.append(card)
 
+    # x = a
     for a in range(n):
         card = [INF]
         for y in range(n):
             card.append(P(a, y))
         cards.append(card)
 
-    if len(cards) != v:
-        raise RuntimeError("Construction error: wrong number of cards.")
-    if any(len(c) != n + 1 for c in cards):
-        raise RuntimeError("Construction error: wrong card size.")
+    if len(cards) != v or any(len(c) != n + 1 for c in cards):
+        raise RuntimeError("Construction error.")
     return cards
 
 
@@ -79,9 +80,8 @@ def verify_dobble_property(cards: List[List[int]]) -> Tuple[bool, str]:
     sets = [set(c) for c in cards]
     for i in range(len(sets)):
         for j in range(i + 1, len(sets)):
-            inter = sets[i].intersection(sets[j])
-            if len(inter) != 1:
-                return False, f"Failed at pair ({i},{j}): intersection size {len(inter)}"
+            if len(sets[i].intersection(sets[j])) != 1:
+                return False, f"Failed at pair ({i},{j})"
     return True, "OK"
 
 
@@ -114,8 +114,6 @@ ALLOWED_WORD_COLORS = {
     "blue": (30, 80, 220, 255),
 }
 
-# A pragmatic list of fonts that *often* exist on Streamlit Cloud/Linux images.
-# If none exist, we fall back to PIL default font.
 FONT_CANDIDATES = [
     "DejaVuSans.ttf",
     "DejaVuSans-Bold.ttf",
@@ -166,26 +164,22 @@ def try_load_font(font_name: str, size: int) -> Optional[ImageFont.FreeTypeFont]
 
 
 def pick_font(rng: random.Random, font_size: int, randomize: bool, preferred: Optional[str] = None) -> ImageFont.ImageFont:
-    # if user chooses a preferred font name and it loads, use it
     if preferred:
         f = try_load_font(preferred, font_size)
         if f:
             return f
 
     if randomize:
-        candidates = FONT_CANDIDATES[:]
-        rng.shuffle(candidates)
-        for name in candidates:
+        cands = FONT_CANDIDATES[:]
+        rng.shuffle(cands)
+        for name in cands:
             f = try_load_font(name, font_size)
             if f:
                 return f
 
-    # fallback: try a default known font
     f = try_load_font("DejaVuSans.ttf", font_size)
     if f:
         return f
-
-    # final fallback
     return ImageFont.load_default()
 
 
@@ -205,17 +199,14 @@ def make_text_symbol(
     if not text:
         return Image.new("RGBA", (base_canvas_px, base_canvas_px), (0, 0, 0, 0))
 
-    # font
     font = pick_font(rng, font_size, randomize_font, preferred=preferred_font)
 
-    # color
     if randomize_color:
         color_name = rng.choice(list(ALLOWED_WORD_COLORS.keys()))
     else:
         color_name = chosen_color_name if chosen_color_name in ALLOWED_WORD_COLORS else "black"
     text_color = ALLOWED_WORD_COLORS[color_name]
 
-    # measure
     tmp = Image.new("RGBA", (base_canvas_px, base_canvas_px), (0, 0, 0, 0))
     d = ImageDraw.Draw(tmp)
     bbox = d.textbbox((0, 0), text, font=font)
@@ -226,17 +217,52 @@ def make_text_symbol(
 
     label = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     dl = ImageDraw.Draw(label)
-
-    # translucent white pill background for readability
     dl.rounded_rectangle((0, 0, w - 1, h - 1), radius=rounded, fill=(255, 255, 255, 220))
+
     tx = (w - tw) // 2 - bbox[0]
     ty = (h - th) // 2 - bbox[1]
     dl.text((tx, ty), text, font=font, fill=text_color)
 
-    # center onto square canvas for consistent scaling/rotation
     canvas_size = max(w, h)
     out = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
     out.alpha_composite(label, ((canvas_size - w) // 2, (canvas_size - h) // 2))
+    return out
+
+
+# ----------------------------
+# Cut outline + bleed border (for scissors)
+# ----------------------------
+
+def add_bleed_border(card: Image.Image, shape: str, bleed_px: int) -> Image.Image:
+    """
+    Adds a white border ring INSIDE the cut line (like a halo) for cleaner scissor cuts.
+    Works on transparent cards.
+    """
+    if bleed_px <= 0:
+        return card
+
+    out = card.copy()
+    overlay = Image.new("RGBA", out.size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(overlay)
+    w, h = out.size
+
+    inset_outer = 3
+    inset_inner = inset_outer + bleed_px
+
+    if shape == "Circle":
+        # outer white ring
+        d.ellipse((inset_outer, inset_outer, w - inset_outer - 1, h - inset_outer - 1),
+                  outline=(255, 255, 255, 255), width=bleed_px * 2)
+        # slightly soften by drawing twice
+        d.ellipse((inset_outer + 1, inset_outer + 1, w - inset_outer - 2, h - inset_outer - 2),
+                  outline=(255, 255, 255, 200), width=max(1, bleed_px * 2 - 2))
+    else:
+        d.rectangle((inset_outer, inset_outer, w - inset_outer - 1, h - inset_outer - 1),
+                    outline=(255, 255, 255, 255), width=bleed_px * 2)
+        d.rectangle((inset_outer + 1, inset_outer + 1, w - inset_outer - 2, h - inset_outer - 2),
+                    outline=(255, 255, 255, 200), width=max(1, bleed_px * 2 - 2))
+
+    out.alpha_composite(overlay)
     return out
 
 
@@ -253,6 +279,10 @@ def draw_cut_outline(card: Image.Image, shape: str, outline_px: int) -> Image.Im
         d.rectangle((inset, inset, w - inset - 1, h - inset - 1), outline=(0, 0, 0, 255), width=outline_px)
     return out
 
+
+# ----------------------------
+# Card layout
+# ----------------------------
 
 def place_symbols_on_card(
     symbol_imgs: List[Image.Image],
@@ -295,7 +325,6 @@ def place_symbols_on_card(
 
                 if box[0] < 0 or box[1] < 0 or box[2] > size_px or box[3] > size_px:
                     continue
-
                 if any(bbox_intersect(box, pb) for pb in placed_boxes):
                     continue
 
@@ -318,9 +347,9 @@ def place_symbols_on_card(
                 break
 
         if not ok:
+            # fallback center
             icon = src.copy()
-            scale = profile.min_scale
-            target_w = max(1, int(size_px * scale))
+            target_w = max(1, int(size_px * profile.min_scale))
             w, h = icon.size
             target_h = max(1, int(target_w * (h / w)))
             icon = icon.resize((target_w, target_h), Image.LANCZOS)
@@ -335,13 +364,12 @@ def place_symbols_on_card(
     return base
 
 
-def make_back_card_image(back_img: Image.Image, size_px: int, shape: str, outline_px: int) -> Image.Image:
-    """
-    Resize/crop a provided card-back image into a square canvas (size_px),
-    then optionally mask to circle, and add outline.
-    """
+# ----------------------------
+# Card back
+# ----------------------------
+
+def make_back_card_image(back_img: Image.Image, size_px: int, shape: str, outline_px: int, bleed_px: int) -> Image.Image:
     back = back_img.convert("RGBA")
-    # fit to square
     back = ImageOps.fit(back, (size_px, size_px), method=Image.LANCZOS, centering=(0.5, 0.5))
 
     if shape == "Circle":
@@ -350,12 +378,13 @@ def make_back_card_image(back_img: Image.Image, size_px: int, shape: str, outlin
         circ.paste(back, (0, 0), mask=mask)
         back = circ
 
+    back = add_bleed_border(back, shape=shape, bleed_px=bleed_px)
     back = draw_cut_outline(back, shape=shape, outline_px=outline_px)
     return back
 
 
 # ----------------------------
-# PDF export (single / duplex)
+# PDF export: cut lines + crop marks + duplex
 # ----------------------------
 
 def draw_cut_outline_vector(c: canvas.Canvas, shape: str, x0: float, y0: float, size_pt: float, line_pt: float):
@@ -364,6 +393,31 @@ def draw_cut_outline_vector(c: canvas.Canvas, shape: str, x0: float, y0: float, 
         c.circle(x0 + size_pt / 2, y0 + size_pt / 2, size_pt / 2)
     else:
         c.rect(x0, y0, size_pt, size_pt)
+
+
+def draw_crop_marks(c: canvas.Canvas, x0: float, y0: float, size_pt: float, mark_len_pt: float, gap_pt: float, line_pt: float):
+    """
+    Simple scissor-friendly crop marks: short ticks outside each corner.
+    """
+    c.setLineWidth(line_pt)
+
+    x1, y1 = x0 + size_pt, y0 + size_pt
+
+    # bottom-left
+    c.line(x0 - gap_pt - mark_len_pt, y0 - gap_pt, x0 - gap_pt, y0 - gap_pt)
+    c.line(x0 - gap_pt, y0 - gap_pt - mark_len_pt, x0 - gap_pt, y0 - gap_pt)
+
+    # bottom-right
+    c.line(x1 + gap_pt, y0 - gap_pt, x1 + gap_pt + mark_len_pt, y0 - gap_pt)
+    c.line(x1 + gap_pt, y0 - gap_pt - mark_len_pt, x1 + gap_pt, y0 - gap_pt)
+
+    # top-left
+    c.line(x0 - gap_pt - mark_len_pt, y1 + gap_pt, x0 - gap_pt, y1 + gap_pt)
+    c.line(x0 - gap_pt, y1 + gap_pt, x0 - gap_pt, y1 + gap_pt + mark_len_pt)
+
+    # top-right
+    c.line(x1 + gap_pt, y1 + gap_pt, x1 + gap_pt + mark_len_pt, y1 + gap_pt)
+    c.line(x1 + gap_pt, y1 + gap_pt, x1 + gap_pt, y1 + gap_pt + mark_len_pt)
 
 
 def build_a4_pdf_duplex(
@@ -375,12 +429,11 @@ def build_a4_pdf_duplex(
     shape: str,
     cutline_pt: float,
     mirror_backs_horizontally: bool = True,
+    crop_marks: bool = True,
+    crop_mark_len_mm: float = 3.5,
+    crop_mark_gap_mm: float = 1.5,
+    crop_mark_line_pt: float = 0.6,
 ) -> bytes:
-    """
-    If back_card_img is None → single-sided PDF (fronts only).
-    Else → duplex PDF: for each front page, the next page is the backs
-    laid out to align when printing duplex (mirrored horizontally by default).
-    """
     page_w, page_h = A4
     size_pt = card_size_mm * mm
     margin_pt = margin_mm * mm
@@ -396,6 +449,9 @@ def build_a4_pdf_duplex(
     max_size = min(step_x, step_y) * 0.92
     size_pt = min(size_pt, max_size)
 
+    mark_len_pt = crop_mark_len_mm * mm
+    gap_pt = crop_mark_gap_mm * mm
+
     def cell_xy(r: int, col: int) -> Tuple[float, float]:
         x = margin_pt + col * step_x + (step_x - size_pt) / 2
         y = page_h - (margin_pt + (r + 1) * step_y) + (step_y - size_pt) / 2
@@ -406,16 +462,21 @@ def build_a4_pdf_duplex(
 
     idx = 0
     while idx < len(front_cards):
-        # ----- FRONT PAGE -----
-        front_positions = []  # store positions of each card on this page in draw order
+        # --- FRONT PAGE ---
+        front_positions = []
         for r in range(rows):
             for col in range(cols):
                 if idx >= len(front_cards) or (r * cols + col) >= cards_per_page:
                     break
+
                 x0, y0 = cell_xy(r, col)
                 front_positions.append((r, col, x0, y0, idx))
 
-                # cut outline vector
+                # crop marks
+                if crop_marks:
+                    draw_crop_marks(c, x0, y0, size_pt, mark_len_pt, gap_pt, crop_mark_line_pt)
+
+                # cut outline
                 draw_cut_outline_vector(c, shape, x0, y0, size_pt, cutline_pt)
 
                 # image
@@ -428,13 +489,14 @@ def build_a4_pdf_duplex(
 
         c.showPage()
 
-        # ----- BACK PAGE (optional) -----
+        # --- BACK PAGE ---
         if back_card_img is not None:
-            # For duplex alignment, mirror column placement horizontally.
-            # (Most printers: "flip on long edge". If yours differs, toggle mirror in UI.)
             for (r, col, x0, y0, _front_idx) in front_positions:
                 back_col = (cols - 1 - col) if mirror_backs_horizontally else col
                 bx0, by0 = cell_xy(r, back_col)
+
+                if crop_marks:
+                    draw_crop_marks(c, bx0, by0, size_pt, mark_len_pt, gap_pt, crop_mark_line_pt)
 
                 draw_cut_outline_vector(c, shape, bx0, by0, size_pt, cutline_pt)
 
@@ -450,12 +512,54 @@ def build_a4_pdf_duplex(
 
 
 # ----------------------------
+# Symbol selection (FIX: words + images used together)
+# ----------------------------
+
+def choose_symbols_for_deck(
+    image_symbols: List[Image.Image],
+    word_symbols: List[Image.Image],
+    v: int,
+    rng: random.Random,
+    force_min_words: int,
+) -> List[Image.Image]:
+    """
+    Mix images + words so both appear on cards.
+    - Shuffles both lists (seeded)
+    - Optionally forces at least N word symbols in the deck (if available)
+    - Returns exactly v symbols
+    """
+    imgs = image_symbols[:]
+    words = word_symbols[:]
+    rng.shuffle(imgs)
+    rng.shuffle(words)
+
+    chosen: List[Image.Image] = []
+
+    # force some words if requested
+    if force_min_words > 0 and len(words) > 0:
+        take_words = min(force_min_words, len(words), v)
+        chosen.extend(words[:take_words])
+        words = words[take_words:]
+
+    # fill remaining with a blended pool
+    pool = imgs + words
+    rng.shuffle(pool)
+
+    remaining = v - len(chosen)
+    chosen.extend(pool[:remaining])
+
+    # final shuffle so forced words aren't always first indices
+    rng.shuffle(chosen)
+    return chosen
+
+
+# ----------------------------
 # Streamlit UI
 # ----------------------------
 
 st.set_page_config(page_title="Dobble Bot (K1/K2/K3)", layout="wide")
 st.title("Dobble Bot 🎴 (K1 / K2 / K3)")
-st.caption("Upload images + optional words → generate → download PNG ZIP + A4 PDF with cut lines (optional duplex backs)")
+st.caption("Scissor-friendly: bleed border + cut line + crop marks (PDF). Words + images mixed correctly.")
 
 colA, colB = st.columns([1.15, 0.85])
 
@@ -487,24 +591,21 @@ with colB:
     size_px = st.slider("Card export size (px)", 800, 2400, 1400, step=100)
 
     outline_px = st.slider("Cut outline thickness on PNG (px)", 0, 20, 6, step=1)
+    bleed_px = st.slider("Bleed border thickness (px) (scissor-friendly)", 0, 30, 10, step=1)
+
     rng_seed = st.number_input("Random seed (same seed = same layout)", value=1234, step=1)
 
     st.markdown("**Word styling**")
     randomize_word_fonts = st.checkbox("Randomize word fonts", value=True)
     randomize_word_colors = st.checkbox("Randomize word colors", value=True)
 
-    preferred_font = st.selectbox(
-        "Preferred font (used if randomize fonts OFF, or if available)",
-        ["(auto)"] + FONT_CANDIDATES,
-        index=0
-    )
+    preferred_font = st.selectbox("Preferred font (used if randomize fonts OFF)", ["(auto)"] + FONT_CANDIDATES, index=0)
     preferred_font = None if preferred_font == "(auto)" else preferred_font
 
-    chosen_word_color = st.selectbox(
-        "Word color (used if randomize colors OFF)",
-        list(ALLOWED_WORD_COLORS.keys()),
-        index=0
-    )
+    chosen_word_color = st.selectbox("Word color (used if randomize colors OFF)", list(ALLOWED_WORD_COLORS.keys()), index=0)
+
+    st.markdown("**Mixing words + images**")
+    force_min_words = st.slider("Force at least this many word-symbols into the deck", 0, 50, 6, step=1)
 
     st.markdown("**PDF settings**")
     cards_per_page = st.selectbox("Cards per A4 page", [6, 8, 9, 12], index=2)
@@ -512,6 +613,12 @@ with colB:
     margin_mm = st.slider("Page margin (mm)", 5, 20, 10, step=1)
     cutline_pt = st.slider("PDF cut line thickness (pt)", 0.2, 2.0, 0.8, step=0.1)
 
+    st.markdown("**Crop marks (PDF)**")
+    crop_marks = st.checkbox("Add crop marks", value=True)
+    crop_mark_len_mm = st.slider("Crop mark length (mm)", 2.0, 6.0, 3.5, step=0.5)
+    crop_mark_gap_mm = st.slider("Crop mark gap from card (mm)", 0.5, 4.0, 1.5, step=0.5)
+
+    st.markdown("**Double-sided PDF**")
     duplex = st.checkbox("Make PDF double-sided with card backs", value=True)
     mirror_backs = st.checkbox("Mirror backs horizontally (recommended)", value=True)
 
@@ -520,12 +627,12 @@ st.divider()
 # Parse words
 words = [w.strip() for w in (words_text or "").splitlines() if w.strip()]
 
-# Load symbols
 imgs_raw = load_images(uploaded) if uploaded else []
 num_images = len(imgs_raw)
 
 rng = random.Random(int(rng_seed))
 
+# Build word symbols
 word_symbols = []
 for w in words:
     sym = make_text_symbol(
@@ -538,13 +645,13 @@ for w in words:
         base_canvas_px=520,
         font_size=90,
     )
-    word_symbols.append(sym)
+    word_symbols.append(normalize_symbol(sym, pad=10))
 
-symbols_pool = [normalize_symbol(im) for im in imgs_raw] + [normalize_symbol(im, pad=10) for im in word_symbols]
-total_symbols = len(symbols_pool)
+image_symbols = [normalize_symbol(im) for im in imgs_raw]
 
+total_symbols = len(image_symbols) + len(word_symbols)
 if total_symbols == 0:
-    st.info("Upload images and/or add words to begin. Smallest true deck needs 7 symbols total.")
+    st.info("Upload images and/or add words to begin. Smallest true deck needs 7 symbols.")
     st.stop()
 
 best_n = best_prime_order_for_symbols(total_symbols)
@@ -555,7 +662,7 @@ if best_n is None:
 needed_symbols = best_n * best_n + best_n + 1
 
 st.subheader("2) Preview")
-st.write(f"Images: **{num_images}** | Words: **{len(words)}** | Total symbols: **{total_symbols}**")
+st.write(f"Images: **{len(image_symbols)}** | Words: **{len(word_symbols)}** | Total symbols: **{total_symbols}**")
 st.write(f"Best valid Dobble order (prime n): **{best_n}** → needs **{needed_symbols}** symbols")
 
 valid_ns = [n for n in range(2, best_n + 1) if is_prime(n) and (n * n + n + 1) <= total_symbols]
@@ -563,26 +670,27 @@ chosen_n = st.selectbox("Deck size (choose smaller n for fewer cards)", valid_ns
 
 v = chosen_n * chosen_n + chosen_n + 1
 k = chosen_n + 1
-
 st.write(f"Selected: **n={chosen_n}** → **{v} cards**, **{k} symbols per card**")
 
 if total_symbols < v:
     st.error(f"Not enough symbols for n={chosen_n}. Need {v}, you have {total_symbols}.")
     st.stop()
 
-# Preview first 24 symbols
+# Preview first 24
+preview_pool = (image_symbols + word_symbols)[:24]
 st.caption("Symbol pool preview (first 24):")
-preview_syms = min(total_symbols, 24)
 prev_cols = st.columns(6)
-for i in range(preview_syms):
+for i, im in enumerate(preview_pool):
     with prev_cols[i % 6]:
-        st.image(symbols_pool[i], caption=f"#{i}", use_container_width=True)
+        st.image(im, caption=f"#{i}", use_container_width=True)
 
-# Prepare back image (optional)
+# Prepare back (optional)
 back_card_prepared = None
 if duplex and back_upload is not None:
     back_img = Image.open(back_upload).convert("RGBA")
-    back_card_prepared = make_back_card_image(back_img, size_px=size_px, shape=shape, outline_px=int(outline_px))
+    back_card_prepared = make_back_card_image(
+        back_img, size_px=size_px, shape=shape, outline_px=int(outline_px), bleed_px=int(bleed_px)
+    )
 
 st.divider()
 st.subheader("3) Generate")
@@ -591,9 +699,16 @@ generate = st.button("Generate Dobble deck", type="primary")
 if not generate:
     st.stop()
 
-# Use first v symbols (stable)
-symbols = symbols_pool[:v]
+# FIX: choose a mixed symbol set of exactly v symbols
+symbols = choose_symbols_for_deck(
+    image_symbols=image_symbols,
+    word_symbols=word_symbols,
+    v=v,
+    rng=rng,
+    force_min_words=int(force_min_words),
+)
 
+# Generate deck
 cards = generate_projective_plane_deck(chosen_n)
 ok, msg = verify_dobble_property(cards)
 if not ok:
@@ -602,6 +717,7 @@ if not ok:
 
 st.success(f"Deck generated and verified ✅  ({v} cards, {k} symbols each)")
 
+# Render
 with st.spinner("Rendering card PNGs..."):
     rendered_cards: List[Image.Image] = []
 
@@ -620,7 +736,11 @@ with st.spinner("Rendering card PNGs..."):
             rng=rng,
             shape=shape,
         )
+
+        # scissor-friendly edge:
+        card_img = add_bleed_border(card_img, shape=shape, bleed_px=int(bleed_px))
         card_img = draw_cut_outline(card_img, shape=shape, outline_px=int(outline_px))
+
         rendered_cards.append(card_img)
 
 st.subheader("Preview generated cards")
@@ -632,12 +752,12 @@ for i in range(preview_gen):
 
 if back_card_prepared is not None:
     st.caption("Card back preview:")
-    st.image(back_card_prepared, use_container_width=False, width=220)
+    st.image(back_card_prepared, width=220)
 
 st.divider()
 st.subheader("4) Download")
 
-# ZIP of PNGs (fronts)
+# ZIP of PNGs (fronts + back)
 zip_buf = io.BytesIO()
 with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
     for i, im in enumerate(rendered_cards, start=1):
@@ -658,28 +778,33 @@ st.download_button(
 )
 
 # PDF
-with st.spinner("Building A4 PDF..."):
+with st.spinner("Building A4 PDF (crop marks + optional duplex backs)..."):
     pdf_bytes = build_a4_pdf_duplex(
         front_cards=rendered_cards,
-        back_card_img=back_card_prepared if duplex else None,
+        back_card_img=back_card_prepared if (duplex and back_card_prepared is not None) else None,
         cards_per_page=int(cards_per_page),
         card_size_mm=float(card_size_mm),
         margin_mm=float(margin_mm),
         shape=shape,
         cutline_pt=float(cutline_pt),
         mirror_backs_horizontally=bool(mirror_backs),
+        crop_marks=bool(crop_marks),
+        crop_mark_len_mm=float(crop_mark_len_mm),
+        crop_mark_gap_mm=float(crop_mark_gap_mm),
+        crop_mark_line_pt=0.6,
     )
 
 pdf_name = f"dobble_{shape.lower()}_n{chosen_n}_A4.pdf" if back_card_prepared is None else f"dobble_{shape.lower()}_n{chosen_n}_A4_duplex.pdf"
 
 st.download_button(
-    "Download A4 PDF (cut lines + optional duplex backs)",
+    "Download A4 PDF (cut lines + crop marks + optional duplex backs)",
     data=pdf_bytes,
     file_name=pdf_name,
     mime="application/pdf",
 )
 
 st.caption(
-    "Printing tip: Print at 100% scale (no 'fit to page'). For duplex: try 'flip on long edge'. "
+    "Scissor tip: the white bleed ring hides small cutting wobbles. "
+    "Print at 100% scale (disable 'fit to page'). For duplex: try 'flip on long edge'. "
     "If backs don’t line up, toggle 'Mirror backs horizontally'."
 )
