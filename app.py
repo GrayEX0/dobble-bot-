@@ -16,11 +16,18 @@ from reportlab.lib.utils import ImageReader
 
 
 # ============================================================
-# Dobble Bot (Streamlit) — Images + Words, Circle/Square,
-# face background (color/image), scissor-friendly bleed,
-# double black outline, crop marks, duplex backs,
-# random fonts/colors for words, upload custom font,
-# word font size slider, bold + text outline option.
+# Dobble Bot (Streamlit)
+# - Images + Words used together
+# - Circle/Square
+# - Front face background (solid color or image)
+# - Scissor friendly: bleed ring + crop marks
+# - Double black outline (PNG + vector PDF)
+# - Duplex PDF backs (mirrored option)
+# - Random fonts/colors for words + upload custom font
+# - Word font size slider + bold + text outline for readability
+# - Custom mode: choose 4/5/6/7/8 symbols per card
+#   GUARANTEE: every card shares >=1 symbol with every other card
+#   (implemented by a shared anchor symbol on every card)
 # ============================================================
 
 
@@ -62,8 +69,10 @@ def generate_projective_plane_deck(n: int) -> List[List[int]]:
     def P(x: int, y: int) -> int:
         return 1 + n + x * n + y
 
+    # line at infinity
     cards.append([INF] + S)
 
+    # y = m x + b
     for m in range(n):
         for b in range(n):
             card = [S[m]]
@@ -72,6 +81,7 @@ def generate_projective_plane_deck(n: int) -> List[List[int]]:
                 card.append(P(x, y))
             cards.append(card)
 
+    # x = a
     for a in range(n):
         card = [INF]
         for y in range(n):
@@ -90,6 +100,69 @@ def verify_dobble_property(cards: List[List[int]]) -> Tuple[bool, str]:
             if len(sets[i].intersection(sets[j])) != 1:
                 return False, f"Failed at pair ({i},{j})"
     return True, "OK"
+
+
+# ----------------------------
+# Custom deck: guarantee overlap for ALL pairs
+# ----------------------------
+
+def generate_custom_deck_all_pairs_share(
+    v: int,
+    symbols_per_card: int,
+    num_cards: int,
+    rng: random.Random,
+    anchor_symbol: int = 0,
+    max_tries: int = 40000,
+) -> List[List[int]]:
+    """
+    GUARANTEE: every pair of cards shares >= 1 symbol.
+    Strategy: include one shared 'anchor_symbol' on every card.
+
+    Note: This guarantee is strong but means one symbol repeats on all cards.
+    """
+    if symbols_per_card < 2:
+        raise ValueError("symbols_per_card must be >= 2")
+    if v < symbols_per_card:
+        raise ValueError("Not enough symbols for requested symbols_per_card")
+    if not (0 <= anchor_symbol < v):
+        raise ValueError("anchor_symbol out of range")
+
+    k = symbols_per_card
+    deck: List[List[int]] = []
+    seen = set()
+
+    pool = [s for s in range(v) if s != anchor_symbol]
+    if len(pool) < (k - 1):
+        raise ValueError("Not enough non-anchor symbols to fill cards.")
+
+    # Maximum unique cards possible under this construction:
+    # Choose (k-1) symbols from (v-1) non-anchor symbols
+    max_unique = math.comb(v - 1, k - 1)
+    if num_cards > max_unique:
+        raise ValueError(
+            f"Requested {num_cards} cards, but max unique possible is {max_unique} "
+            f"with v={v}, k={k} (anchor on every card). Reduce cards or increase symbols."
+        )
+
+    tries = 0
+    while len(deck) < num_cards and tries < max_tries:
+        tries += 1
+        rest = rng.sample(pool, k - 1)
+        key = tuple(sorted([anchor_symbol] + rest))
+        if key in seen:
+            continue
+        seen.add(key)
+        card = list(key)
+        rng.shuffle(card)
+        deck.append(card)
+
+    if len(deck) < num_cards:
+        raise ValueError(
+            f"Could only generate {len(deck)} unique cards. "
+            f"Try fewer cards, increase symbols, or reduce k."
+        )
+
+    return deck
 
 
 # ----------------------------
@@ -112,7 +185,6 @@ PROFILES = {
     "K3 (denser, more challenge)": RenderProfile("K3", 0.16, 0.28, 40, 0.06, 650),
 }
 
-
 ALLOWED_WORD_COLORS = {
     "black": (0, 0, 0, 255),
     "red": (220, 30, 30, 255),
@@ -121,7 +193,6 @@ ALLOWED_WORD_COLORS = {
     "blue": (30, 80, 220, 255),
 }
 
-# Candidate fonts commonly available on Streamlit Cloud / Linux images
 FONT_CANDIDATES = [
     "DejaVuSans.ttf",
     "DejaVuSans-Bold.ttf",
@@ -172,10 +243,6 @@ def try_load_font(font_name_or_path: str, size: int) -> Optional[ImageFont.FreeT
 
 
 def save_uploaded_font(uploaded_font_file) -> Optional[str]:
-    """
-    Save an uploaded font file to a local path Streamlit can read.
-    Returns filesystem path or None.
-    """
     if uploaded_font_file is None:
         return None
     ext = os.path.splitext(uploaded_font_file.name)[1].lower()
@@ -196,12 +263,6 @@ def pick_font(
     include_uploaded_in_random_pool: bool = True,
     force_bold: bool = False,
 ) -> ImageFont.ImageFont:
-    """
-    If a custom font is uploaded:
-      - When randomize is OFF → use it (unless preferred overrides it).
-      - When randomize is ON and include_uploaded_in_random_pool is True → add it to candidates.
-    force_bold: if True, try to choose a bold font candidate when possible.
-    """
     # Preferred system font (if provided) takes priority
     if preferred:
         f = try_load_font(preferred, font_size)
@@ -219,7 +280,6 @@ def pick_font(
         candidates.append(uploaded_font_path)
 
     if force_bold:
-        # prefer files with "Bold" in name first
         bold_first = [c for c in candidates if "bold" in c.lower()]
         non_bold = [c for c in candidates if "bold" not in c.lower()]
         candidates = bold_first + non_bold
@@ -227,13 +287,11 @@ def pick_font(
     if randomize:
         rng.shuffle(candidates)
 
-    # Try candidates in order
     for name in candidates:
         f = try_load_font(name, font_size)
         if f:
             return f
 
-    # Fallbacks
     f = try_load_font("DejaVuSans.ttf", font_size)
     if f:
         return f
@@ -249,19 +307,14 @@ def draw_text_with_outline(
     outline_fill: Tuple[int, int, int, int],
     outline_px: int,
 ):
-    """
-    Draw text with a stroke/outline by drawing the text multiple times offset.
-    """
     x, y = pos
     if outline_px <= 0:
         draw.text((x, y), text, font=font, fill=fill)
         return
-
     for dx in range(-outline_px, outline_px + 1):
         for dy in range(-outline_px, outline_px + 1):
             if dx == 0 and dy == 0:
                 continue
-            # circular-ish stroke
             if dx * dx + dy * dy <= outline_px * outline_px:
                 draw.text((x + dx, y + dy), text, font=font, fill=outline_fill)
     draw.text((x, y), text, font=font, fill=fill)
@@ -285,15 +338,10 @@ def make_text_symbol(
     pad: int = 24,
     rounded: int = 28,
 ) -> Image.Image:
-    """
-    Creates a transparent RGBA 'symbol' containing the text on a translucent pill.
-    Supports custom uploaded font, random fonts, random colors, bold, and outline.
-    """
     text = text.strip()
     if not text:
         return Image.new("RGBA", (base_canvas_px, base_canvas_px), (0, 0, 0, 0))
 
-    # font
     font = pick_font(
         rng=rng,
         font_size=word_font_size,
@@ -304,17 +352,14 @@ def make_text_symbol(
         force_bold=force_bold,
     )
 
-    # color
     if randomize_color:
         color_name = rng.choice(list(ALLOWED_WORD_COLORS.keys()))
     else:
         color_name = chosen_color_name if chosen_color_name in ALLOWED_WORD_COLORS else "black"
     text_color = ALLOWED_WORD_COLORS[color_name]
 
-    # outline color
     outline_fill = (0, 0, 0, 255) if outline_color == "black" else (255, 255, 255, 255)
 
-    # measure
     tmp = Image.new("RGBA", (base_canvas_px, base_canvas_px), (0, 0, 0, 0))
     d = ImageDraw.Draw(tmp)
     bbox = d.textbbox((0, 0), text, font=font)
@@ -325,8 +370,6 @@ def make_text_symbol(
 
     label = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     dl = ImageDraw.Draw(label)
-
-    # translucent white pill background for readability
     dl.rounded_rectangle((0, 0, w - 1, h - 1), radius=rounded, fill=(255, 255, 255, 220))
 
     tx = (w - tw) // 2 - bbox[0]
@@ -345,7 +388,6 @@ def make_text_symbol(
     else:
         dl.text((tx, ty), text, font=font, fill=text_color)
 
-    # center onto square canvas for consistent scaling/rotation
     canvas_size = max(w, h)
     out = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
     out.alpha_composite(label, ((canvas_size - w) // 2, (canvas_size - h) // 2))
@@ -672,7 +714,7 @@ def build_a4_pdf_duplex(
 
 
 # ----------------------------
-# Symbol selection (words + images together)
+# Symbol selection (images + words mixed)
 # ----------------------------
 
 def choose_symbols_for_deck(
@@ -689,6 +731,7 @@ def choose_symbols_for_deck(
 
     chosen: List[Image.Image] = []
 
+    # force some words
     if force_min_words > 0 and len(words) > 0:
         take_words = min(force_min_words, len(words), v)
         chosen.extend(words[:take_words])
@@ -710,7 +753,7 @@ def choose_symbols_for_deck(
 
 st.set_page_config(page_title="Dobble Bot (K1/K2/K3)", layout="wide")
 st.title("Dobble Bot 🎴 (K1 / K2 / K3)")
-st.caption("Scissor-friendly: bleed border + double black outline + crop marks (PDF). Face background supported.")
+st.caption("Strict Dobble or Custom mode (every pair shares ≥1 symbol). Circle/Square, backgrounds, duplex, crop marks, etc.")
 
 colA, colB = st.columns([1.15, 0.85])
 
@@ -752,6 +795,20 @@ with colB:
     shape = st.selectbox("Card shape", ["Circle", "Square"], index=0)
     size_px = st.slider("Card export size (px)", 800, 2400, 1400, step=100)
 
+    st.markdown("**Deck mode**")
+    deck_mode = st.radio(
+        "Deck generation",
+        ["Strict Dobble (1 match per pair)", "Custom (>=1 match between every pair)"],
+        horizontal=True
+    )
+
+    # Custom mode: user-chosen symbols per card (4–8)
+    custom_symbols_per_card = st.selectbox(
+        "Symbols per card (Custom mode)",
+        [4, 5, 6, 7, 8],
+        index=2
+    )
+
     st.markdown("**Scissor cutting**")
     bleed_px = st.slider("Bleed border thickness (px)", 0, 30, 10, step=1)
 
@@ -771,10 +828,7 @@ with colB:
         type=["ttf", "otf"],
         accept_multiple_files=False
     )
-    use_uploaded_font_in_random_pool = st.checkbox(
-        "Include uploaded font when randomizing fonts",
-        value=True
-    )
+    use_uploaded_font_in_random_pool = st.checkbox("Include uploaded font when randomizing fonts", value=True)
 
     word_font_size = st.slider("Word font size", 24, 140, 90, step=2)
 
@@ -785,7 +839,6 @@ with colB:
     preferred_font = None if preferred_font == "(auto)" else preferred_font
 
     chosen_word_color = st.selectbox("Word color (used if randomize colors OFF)", list(ALLOWED_WORD_COLORS.keys()), index=0)
-
     force_bold_words = st.checkbox("Bold words (best-effort)", value=False)
 
     st.markdown("**Text outline (readability)**")
@@ -794,13 +847,12 @@ with colB:
     text_outline_px = st.slider("Outline thickness (px)", 1, 6, 2, step=1)
 
     st.markdown("**Mix words + images**")
-    force_min_words = st.slider("Force at least this many word-symbols into the deck", 0, 50, 6, step=1)
+    force_min_words = st.slider("Force at least this many word-symbols into the symbol set", 0, 50, 6, step=1)
 
     st.markdown("**PDF settings**")
     cards_per_page = st.selectbox("Cards per A4 page", [6, 8, 9, 12], index=2)
     card_size_mm = st.slider("Card size on A4 (mm)", 55, 95, 80, step=1)
     margin_mm = st.slider("Page margin (mm)", 5, 20, 10, step=1)
-
     outline_pt = st.slider("PDF outline thickness (pt)", 0.2, 2.0, 0.9, step=0.1)
     outline_gap_mm = st.slider("PDF gap between outlines (mm)", 0.5, 3.0, 1.2, step=0.1)
 
@@ -812,6 +864,11 @@ with colB:
     st.markdown("**Double-sided PDF**")
     duplex = st.checkbox("Make PDF double-sided with card backs", value=True)
     mirror_backs = st.checkbox("Mirror backs horizontally (recommended)", value=True)
+
+    st.markdown("**Preview**")
+    preview_count = st.slider("How many generated cards to preview (paged)", 6, 60, 18, step=6)
+    preview_cols = st.selectbox("Preview columns", [3, 4, 5, 6], index=3)
+    preview_page = st.number_input("Preview page", min_value=1, value=1, step=1)
 
 st.divider()
 
@@ -854,30 +911,48 @@ for w in words:
     word_symbols.append(normalize_symbol(sym, pad=10))
 
 image_symbols = [normalize_symbol(im) for im in imgs_raw]
-
 total_symbols = len(image_symbols) + len(word_symbols)
+
 if total_symbols == 0:
-    st.info("Upload images and/or add words. Smallest true deck needs 7 symbols.")
+    st.info("Upload images and/or add words. Smallest strict Dobble deck needs 7 symbols.")
     st.stop()
 
+# For STRICT Dobble we need a valid prime order n such that v=n^2+n+1 <= total_symbols
 best_n = best_prime_order_for_symbols(total_symbols)
 if best_n is None:
-    st.error(f"You have {total_symbols} symbols total. The smallest true deck is n=2 (7 symbols). Add more.")
+    st.error(f"You have {total_symbols} symbols total. The smallest strict deck is n=2 (7 symbols). Add more.")
     st.stop()
 
 valid_ns = [n for n in range(2, best_n + 1) if is_prime(n) and (n * n + n + 1) <= total_symbols]
-chosen_n = st.selectbox("Deck size (choose smaller n for fewer cards)", valid_ns, index=len(valid_ns) - 1)
+chosen_n = st.selectbox("Symbol set size (n) (bigger n = more symbols available)", valid_ns, index=len(valid_ns) - 1)
 
 v = chosen_n * chosen_n + chosen_n + 1
-k = chosen_n + 1
+strict_k = chosen_n + 1
 
-st.subheader("2) Preview")
-st.write(f"Images: **{len(image_symbols)}** | Words: **{len(word_symbols)}** | Total symbols: **{total_symbols}**")
-st.write(f"Selected n={chosen_n} → **{v} cards**, **{k} symbols per card**")
+# Mode-specific k
+if deck_mode == "Strict Dobble (1 match per pair)":
+    k = strict_k
+else:
+    k = int(custom_symbols_per_card)
+
+st.subheader("2) Preview / Settings Summary")
+st.write(f"Images: **{len(image_symbols)}** | Words: **{len(word_symbols)}** | Total symbols uploaded: **{total_symbols}**")
+st.write(f"Using symbol set size: **v = {v}** (chosen from your uploaded pool)")
 
 if total_symbols < v:
-    st.error(f"Not enough symbols for n={chosen_n}. Need {v}, you have {total_symbols}.")
+    st.error(f"Not enough total symbols to build symbol set v={v}. You have {total_symbols}.")
     st.stop()
+
+if deck_mode == "Strict Dobble (1 match per pair)":
+    st.write(f"Strict Dobble: **{v} cards**, **{k} symbols per card** (fixed)")
+else:
+    # Custom mode controls (need v known to compute max)
+    max_unique = math.comb(v - 1, k - 1) if (v >= k and k >= 1) else 0
+    st.write(f"Custom mode: **{k} symbols per card** (allowed: 4–8)")
+    st.write(f"Max unique cards possible with guarantee: **{max_unique}**")
+
+    num_cards_custom = st.slider("Number of cards to generate (Custom mode)", 5, int(min(2000, max_unique)) if max_unique > 0 else 5, min(31, int(max_unique)) if max_unique > 0 else 5, step=1)
+    anchor_symbol = st.slider("Shared symbol (anchor) index (0..v-1)", 0, v - 1, 0, step=1)
 
 # Face background
 face_bg_img = None
@@ -897,8 +972,8 @@ except Exception:
     st.error("Invalid face color hex. Example: #FFFFFF or #FFEEAA")
     st.stop()
 
-# Preview symbol pool
-st.caption("Symbol pool preview (first 24):")
+# Preview symbol pool (first 24)
+st.caption("Symbol pool preview (first 24 of your uploads):")
 preview_pool = (image_symbols + word_symbols)[:24]
 prev_cols = st.columns(6)
 for i, im in enumerate(preview_pool):
@@ -920,11 +995,11 @@ if duplex and back_upload is not None:
 
 st.divider()
 st.subheader("3) Generate")
-generate = st.button("Generate Dobble deck", type="primary")
-
+generate = st.button("Generate deck", type="primary")
 if not generate:
     st.stop()
 
+# Choose exactly v symbols from uploads, mixing words+images, forcing some words if desired
 symbols = choose_symbols_for_deck(
     image_symbols=image_symbols,
     word_symbols=word_symbols,
@@ -933,17 +1008,32 @@ symbols = choose_symbols_for_deck(
     force_min_words=int(force_min_words),
 )
 
-cards = generate_projective_plane_deck(chosen_n)
-ok, msg = verify_dobble_property(cards)
-if not ok:
-    st.error("Deck generation failed verification: " + msg)
-    st.stop()
-
-st.success(f"Deck generated and verified ✅  ({v} cards, {k} symbols each)")
+# Generate card symbol-index lists
+if deck_mode == "Strict Dobble (1 match per pair)":
+    cards = generate_projective_plane_deck(chosen_n)
+    ok, msg = verify_dobble_property(cards)
+    if not ok:
+        st.error("Deck generation failed verification: " + msg)
+        st.stop()
+    st.success(f"Strict Dobble deck verified ✅  ({len(cards)} cards, {k} symbols each)")
+else:
+    try:
+        cards = generate_custom_deck_all_pairs_share(
+            v=v,
+            symbols_per_card=k,
+            num_cards=int(num_cards_custom),
+            rng=rng,
+            anchor_symbol=int(anchor_symbol),
+        )
+    except ValueError as e:
+        st.error(str(e))
+        st.stop()
+    st.success(f"Custom deck generated ✅  ({len(cards)} cards, {k} symbols each). Every pair shares ≥ 1 symbol.")
 
 # Render cards
 with st.spinner("Rendering card PNGs..."):
     rendered_cards: List[Image.Image] = []
+
     order = list(range(len(cards)))
     rng.shuffle(order)
 
@@ -961,17 +1051,25 @@ with st.spinner("Rendering card PNGs..."):
             shape=shape,
         )
 
-        # Finishing touches
         card_img = add_bleed_border(card_img, shape=shape, bleed_px=int(bleed_px))
         card_img = draw_double_black_outline(card_img, shape=shape, outer_px=int(outline_px), gap_px=int(outline_gap_px))
 
         rendered_cards.append(card_img)
 
+# Preview generated cards (paged)
 st.subheader("Preview generated cards")
-preview_gen = min(len(rendered_cards), 12)
-gen_cols = st.columns(6)
-for i in range(preview_gen):
-    with gen_cols[i % 6]:
+total = len(rendered_cards)
+per_page = int(preview_count)
+cols_n = int(preview_cols)
+max_pages = max(1, math.ceil(total / per_page))
+page = max(1, min(int(preview_page), max_pages))
+start = (page - 1) * per_page
+end = min(start + per_page, total)
+st.caption(f"Showing cards {start + 1}–{end} of {total} (page {page} / {max_pages})")
+
+grid_cols = st.columns(cols_n)
+for i in range(start, end):
+    with grid_cols[(i - start) % cols_n]:
         st.image(rendered_cards[i], caption=f"Card {i + 1}", use_container_width=True)
 
 st.caption("Face background preview:")
@@ -1000,7 +1098,7 @@ zip_buf.seek(0)
 st.download_button(
     "Download cards (PNG ZIP)",
     data=zip_buf.getvalue(),
-    file_name=f"dobble_{shape.lower()}_n{chosen_n}_png.zip",
+    file_name=f"dobble_{shape.lower()}_{'strict' if deck_mode.startswith('Strict') else 'custom'}_png.zip",
     mime="application/zip",
 )
 
@@ -1022,7 +1120,9 @@ with st.spinner("Building A4 PDF (crop marks + optional duplex backs)..."):
         crop_mark_line_pt=0.6,
     )
 
-pdf_name = f"dobble_{shape.lower()}_n{chosen_n}_A4.pdf" if back_card_prepared is None else f"dobble_{shape.lower()}_n{chosen_n}_A4_duplex.pdf"
+pdf_name = f"dobble_{shape.lower()}_{'strict' if deck_mode.startswith('Strict') else 'custom'}_A4.pdf"
+if duplex and back_card_prepared is not None:
+    pdf_name = pdf_name.replace(".pdf", "_duplex.pdf")
 
 st.download_button(
     "Download A4 PDF (double outline + crop marks + optional duplex backs)",
@@ -1032,7 +1132,6 @@ st.download_button(
 )
 
 st.caption(
-    "Scissor tip: the white bleed ring hides small cutting wobbles. "
-    "Print at 100% scale (disable 'fit to page'). "
+    "Print tip: print at 100% scale (disable 'fit to page'). "
     "For duplex: try 'flip on long edge'. If alignment is off, toggle 'Mirror backs horizontally'."
 )
